@@ -1,0 +1,134 @@
+#pragma once
+const char PAGINA[] PROGMEM = R"HTML(<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pen Drive de Rede</title>
+<style>
+:root{--az:#00a8e8;--fu:#f4f6f8;--tx:#1d2733;--cz:#6b7785;--ok:#1aa260;--er:#d93838}
+*{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:var(--fu);color:var(--tx)}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:22px;margin:4px 0 2px}.sub{color:var(--cz);font-size:14px;margin-bottom:16px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px #0001}
+#zona{border:2px dashed var(--az);border-radius:12px;padding:34px 12px;text-align:center;cursor:pointer;color:var(--az);font-weight:600}
+#zona.sobre{background:#e6f6fd}
+.barra{height:8px;background:#e3e8ee;border-radius:4px;overflow:hidden;margin-top:12px;display:none}
+.barra i{display:block;height:100%;width:0;background:var(--az)}
+#msg{margin-top:10px;font-weight:600;min-height:20px}
+.lin{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #eef1f4}
+.lin:last-child{border:0}.lin .n{flex:1;word-break:break-all}.lin small{color:var(--cz)}
+button{font:inherit;border:0;border-radius:8px;padding:8px 12px;background:#e3e8ee;cursor:pointer}
+button.v{background:#fde8e8;color:var(--er)}
+label{display:flex;gap:8px;align-items:center;margin:8px 0}
+input[type=text],input[type=password],select{font:inherit;width:100%;padding:8px;border:1px solid #cfd6de;border-radius:8px;margin:4px 0 10px}
+details summary{cursor:pointer;font-weight:600}
+</style></head><body><main>
+<h1 id="tit">Pen Drive de Rede</h1>
+<div class="sub" id="sub">carregando…</div>
+
+<div class="card">
+<div id="zona">Arraste os arquivos aqui<br><small style="font-weight:400">ou toque para escolher (pode ser vários)</small></div>
+<input type="file" id="arq" multiple hidden>
+<div class="barra" id="barra"><i></i></div>
+<div id="msg"></div>
+<label><input type="checkbox" id="subst"> Apagar os arquivos anteriores ao enviar</label>
+</div>
+
+<div class="card"><b>No pen drive agora</b><div id="lista"></div></div>
+
+<div class="card"><details><summary>Configurações</summary>
+<p><b>Nome da plaquinha</b> (vira o endereço <i>nome</i>.local e o nome do pen drive)</p>
+<input type="text" id="nome" maxlength="11">
+<p><b>Ao trocar o arquivo</b></p>
+<select id="modo"><option value="1">Desplugar e plugar o USB (mais garantido)</option>
+<option value="0">Só trocar o disco (mais rápido)</option></select>
+<button onclick="salvarCfg()">Salvar</button>
+<hr style="border:0;border-top:1px solid #eef1f4;margin:16px 0">
+<p><b>Wi-Fi</b></p>
+<select id="redes"><option>procurando redes…</option></select>
+<input type="text" id="ssid" placeholder="ou digite o nome da rede">
+<input type="password" id="senha" placeholder="senha">
+<button onclick="salvarWifi()">Conectar</button>
+<hr style="border:0;border-top:1px solid #eef1f4;margin:16px 0">
+<p><b>Atualizar programa</b> (arquivo .bin)</p>
+<input type="file" id="fw" accept=".bin"><button onclick="atualizar()">Atualizar</button>
+<button onclick="if(confirm('A plaquinha sai do ar até ser gravada pelo cabo. Continuar?'))fetch('/api/modo-gravacao',{method:'POST'})">Modo gravação pelo cabo</button>
+<p id="info" style="color:var(--cz);font-size:13px"></p>
+</details></div>
+</main><script>
+const $=i=>document.getElementById(i);
+function kb(b){return b>1048576?(b/1048576).toFixed(1)+' MB':Math.ceil(b/1024)+' KB'}
+function msg(t,cor){$('msg').textContent=t;$('msg').style.color=cor||''}
+async function estado(){
+ const e=await (await fetch('/api/estado')).json();
+ $('tit').textContent='Pen Drive · '+e.nome;
+ $('sub').textContent=kb(e.livre)+' livres de '+kb(e.total)+(e.ip?' · '+e.ip:'');
+ $('subst').checked=e.substituir;
+ if(document.activeElement!==$('nome'))$('nome').value=e.nome;
+ $('modo').value=e.replugar?'1':'0';
+ $('info').textContent='versão '+e.versao+' · Wi-Fi: '+(e.ssid||'não conectado')+(e.rssi?' ('+e.rssi+' dBm)':'');
+ $('lista').innerHTML=e.arquivos.length?'':'<p style="color:var(--cz)">vazio</p>';
+ e.arquivos.slice().reverse().forEach(a=>{
+  const d=document.createElement('div');d.className='lin';
+  d.innerHTML='<div class="n"></div><small>'+kb(a.tamanho)+' · '+a.data+'</small><button class="v">apagar</button>';
+  d.querySelector('.n').textContent=a.nome;
+  d.querySelector('button').onclick=()=>apagar(a.nome);
+  $('lista').appendChild(d);
+ });
+}
+// um por vez, em fila; "apagar anteriores" vale só pro 1º, senão o lote apaga a si mesmo
+function envia1(f,subst,rot){return new Promise(ok=>{
+ const fd=new FormData();fd.append('arquivo',f,f.name);
+ const x=new XMLHttpRequest();
+ x.open('POST','/enviar?substituir='+(subst?1:0));
+ msg('Enviando '+rot+f.name+'…');
+ x.upload.onprogress=e=>{if(e.lengthComputable)$('barra').firstChild.style.width=(100*e.loaded/e.total)+'%'};
+ x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(e){}ok(x.status==200&&r.ok?'':(r.erro||'falhou'))};
+ x.onerror=()=>ok('sem conexão com a plaquinha');
+ x.send(fd);
+})}
+async function enviar(lista){
+ const fs=[...(lista||[])];if(!fs.length)return;
+ $('barra').style.display='block';
+ const erros=[];
+ for(let i=0;i<fs.length;i++){
+  $('barra').firstChild.style.width=0;
+  const e=await envia1(fs[i],i==0&&$('subst').checked,fs.length>1?'('+(i+1)+'/'+fs.length+') ':'');
+  if(e)erros.push(fs[i].name+': '+e);
+ }
+ $('barra').style.display='none';$('barra').firstChild.style.width=0;
+ if(!erros.length)msg('✓ '+(fs.length>1?fs.length+' arquivos já estão':fs[0].name+' já está')+' no pen drive','var(--ok)');
+ else msg('✗ '+erros.join(' · '),'var(--er)');
+ estado();
+}
+async function apagar(n){
+ if(!confirm('Apagar '+n+'?'))return;
+ await fetch('/api/apagar?nome='+encodeURIComponent(n),{method:'POST'});estado();
+}
+async function salvarCfg(){
+ await fetch('/api/config?nome='+encodeURIComponent($('nome').value)+'&replugar='+$('modo').value+'&substituir='+($('subst').checked?1:0),{method:'POST'});
+ msg('Salvo. Se mudou o nome, a plaquinha reinicia.','var(--ok)');setTimeout(estado,4000);
+}
+async function salvarWifi(){
+ const s=$('ssid').value||$('redes').value;
+ await fetch('/api/wifi?ssid='+encodeURIComponent(s)+'&senha='+encodeURIComponent($('senha').value),{method:'POST'});
+ alert('Reiniciando para conectar em '+s+'. Depois acesse '+$('nome').value.toLowerCase()+'.local');
+}
+async function redes(){
+ try{const r=await (await fetch('/api/redes')).json();
+ $('redes').innerHTML=r.map(n=>'<option></option>').join('');
+ [...$('redes').options].forEach((o,i)=>o.textContent=o.value=r[i]);}catch(e){}
+}
+function atualizar(){
+ const f=$('fw').files[0];if(!f)return;
+ const fd=new FormData();fd.append('fw',f);
+ msg('Atualizando, não desligue…');
+ fetch('/atualizar',{method:'POST',body:fd}).then(r=>r.text()).then(t=>msg(t,'var(--ok)'));
+}
+$('zona').onclick=()=>$('arq').click();
+$('arq').onchange=e=>{enviar(e.target.files);e.target.value=''};
+['dragenter','dragover'].forEach(v=>$('zona').addEventListener(v,e=>{e.preventDefault();$('zona').classList.add('sobre')}));
+['dragleave','drop'].forEach(v=>$('zona').addEventListener(v,e=>{e.preventDefault();$('zona').classList.remove('sobre')}));
+$('zona').addEventListener('drop',e=>enviar(e.dataTransfer.files));
+$('subst').onchange=()=>fetch('/api/config?substituir='+($('subst').checked?1:0),{method:'POST'});
+estado();redes();setInterval(estado,5000);
+</script></body></html>)HTML";

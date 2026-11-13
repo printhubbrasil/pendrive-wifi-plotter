@@ -1,0 +1,5 @@
+build/
+**/build/
+*.bak-*
+pendrive_rede/redes.h
+.DS_Store

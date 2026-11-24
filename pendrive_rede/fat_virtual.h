@@ -1,6 +1,7 @@
 // Disco FAT16 "de mentira": a máquina vê um pen drive normal, mas cada setor é
 // montado na hora a partir dos arquivos guardados no LittleFS. Só leitura.
 #pragma once
+#include "esp_rom_crc.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <vector>
@@ -34,6 +35,9 @@ struct Arquivo {
   uint16_t cluster; // primeiro cluster (0 = vazio)
   uint16_t nClusters;
   time_t quando;
+  uint32_t crc = 0;                 // v1.19: soma do arquivo como está guardado na placa
+  uint32_t crcEntrega = 0;          // soma do que está sendo entregue à máquina nesta leitura
+  uint32_t proxOff = 0xFFFFFFFF;    // próximo trecho esperado (leitura em ordem)
 };
 
 static std::vector<Arquivo> arquivos;
@@ -41,9 +45,25 @@ static uint8_t raiz[SETORES_RAIZ * SETOR];
 static char rotulo[12] = "PLOTTER    ";
 static uint32_t serialVol = 0x50480001;
 static SemaphoreHandle_t trava = nullptr;
-static String info;   // vira o _REDE.TXT oculto: endereço e estado do Wi-Fi
+// _REDE.TXT oculto: endereço e estado do Wi-Fi. Tamanho FIXO (um setor): o texto pode mudar
+// com o pen drive plugado, sem precisar tirar e pôr o USB.
+const uint32_t TAM_INFO = 512;
+static char info[TAM_INFO];
+static bool temInfo = false;
 static File aberto;
 static int abertoIdx = -1;
+// v1.19: conferência do que é entregue à máquina (só registra; não muda o que a máquina recebe,
+// a não ser tentar de novo quando a leitura da memória falha).
+static uint32_t falhasLeitura = 0, entregasOk = 0, entregasRuins = 0;
+static void (*aviso)(uint8_t tipo, uint32_t a, uint32_t b) = nullptr;
+static uint32_t somaDoArquivo(const String &caminho) {
+  File f = LittleFS.open(caminho, "r");
+  if (!f) return 0;
+  uint8_t buf[512]; uint32_t c = 0; int n;
+  while ((n = f.read(buf, sizeof buf)) > 0) c = esp_rom_crc32_le(c, buf, n);
+  f.close();
+  return c;
+}
 
 // O que a máquina grava fica só na memória (PSRAM) até o próximo replug. Disco
 // "só leitura" fazia máquina com Android/Linux (SAGA) reconhecer o pen drive e não
@@ -134,6 +154,15 @@ void iniciar(const String &nomeVolume) {
   LittleFS.mkdir(PASTA);
 }
 
+void definirInfo(const String &t) {
+  xSemaphoreTake(trava, portMAX_DELAY);
+  memset(info, ' ', TAM_INFO);
+  memcpy(info, t.c_str(), std::min<size_t>(t.length(), TAM_INFO - 2));
+  info[TAM_INFO - 2] = '\r'; info[TAM_INFO - 1] = '\n';
+  temInfo = true;
+  xSemaphoreGive(trava);
+}
+
 // Relê a pasta e remonta a tabela. Chamar com o USB "desplugado".
 void reconstruir() {
   xSemaphoreTake(trava, portMAX_DELAY);
@@ -146,8 +175,9 @@ void reconstruir() {
     arquivos.push_back({String(f.name()), String(PASTA) + "/" + f.name(), (uint32_t)f.size(), 0, 0, f.getLastWrite()});
   }
   d.close();
+  for (auto &a : arquivos) a.crc = somaDoArquivo(a.caminho);
   std::sort(arquivos.begin(), arquivos.end(), [](const Arquivo &a, const Arquivo &b) { return a.quando < b.quando; });
-  if (!info.isEmpty()) arquivos.insert(arquivos.begin(), {"_REDE.TXT", "", (uint32_t)info.length(), 0, 0, time(nullptr)});
+  if (temInfo) arquivos.insert(arquivos.begin(), {"_REDE.TXT", "", TAM_INFO, 0, 0, time(nullptr)});
 
   memset(raiz, 0, sizeof(raiz));
   memcpy(raiz, rotulo, 11);
@@ -227,15 +257,33 @@ static void setorDados(uint32_t s, uint8_t *b) {
     if (!a.nClusters || c < a.cluster || c >= (uint32_t)a.cluster + a.nClusters) continue;
     uint32_t off = (c - a.cluster) * TAM_CLUSTER + (s % SPC) * SETOR;
     if (off >= a.tamanho) return;
-    if (a.caminho.isEmpty()) { memcpy(b, info.c_str() + off, std::min<uint32_t>(SETOR, a.tamanho - off)); return; }
-    if (abertoIdx != i) {
-      if (abertoIdx >= 0) aberto.close();
-      aberto = LittleFS.open(a.caminho, "r");
-      abertoIdx = aberto ? i : -1;
-      if (abertoIdx < 0) return;
+    if (a.caminho.isEmpty()) { memcpy(b, info + off, std::min<uint32_t>(SETOR, a.tamanho - off)); return; }
+    uint32_t quer = std::min<uint32_t>(SETOR, a.tamanho - off);
+    int lidos = -1;
+    for (int tent = 0; tent < 3; tent++) {
+      if (abertoIdx != i) {
+        if (abertoIdx >= 0) aberto.close();
+        aberto = LittleFS.open(a.caminho, "r");
+        abertoIdx = aberto ? i : -1;
+      }
+      lidos = (abertoIdx == i && aberto.seek(off)) ? (int)aberto.read(b, quer) : -1;
+      if (lidos == (int)quer) break;
+      falhasLeitura++;                               // a memória não devolveu o trecho: fecha, reabre e tenta de novo
+      if (aviso) aviso(16, off, (uint32_t)lidos);
+      if (abertoIdx >= 0) { aberto.close(); abertoIdx = -1; }
+      memset(b, 0, SETOR);
     }
-    aberto.seek(off);
-    aberto.read(b, std::min<uint32_t>(SETOR, a.tamanho - off));
+    if (off == 0) { a.crcEntrega = 0; a.proxOff = 0; }
+    if (off == a.proxOff) {
+      a.crcEntrega = esp_rom_crc32_le(a.crcEntrega, b, quer);
+      a.proxOff = off + quer;
+      if (a.proxOff >= a.tamanho) {                  // a máquina leu até o fim, em ordem: confere
+        bool ok = a.crcEntrega == a.crc;
+        if (ok) entregasOk++; else entregasRuins++;
+        if (aviso) aviso(ok ? 17 : 18, (uint32_t)i, a.crcEntrega);
+        a.proxOff = 0xFFFFFFFF;
+      }
+    } else a.proxOff = 0xFFFFFFFF;
     return;
   }
 }

@@ -6,3 +6,4 @@ pendrive_rede/redes.h
 ferramentas/*.log
 ferramentas/placas_conhecidas.json
 __pycache__/
+*_reserva.bin

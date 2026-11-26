@@ -18,7 +18,7 @@
 #include "fat_virtual.h"
 #include "pagina.h"
 
-#define VERSAO "1.22"
+#define VERSAO "1.24"
 
 int mscRegistro = -99;
 volatile bool mscPresente = false;   // v1.12: camada de pen drive própria (no lugar do USBMSC do núcleo)
@@ -645,7 +645,7 @@ void setup() {
   nome = prefs.getString("nome", "plotter");
   ssid = prefs.getString("ssid", "");
   senha = prefs.getString("senha", "");
-  substituir = prefs.getBool("subst", true);
+  substituir = false;  // 25/11: a opcao de apagar os anteriores ao enviar saiu do painel
   replugar = prefs.getBool("replugar", true);
   aposEntrega = prefs.getUChar("aposEnt", 0);
   led(20, 8, 0);
